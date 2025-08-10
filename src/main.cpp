@@ -2,99 +2,82 @@
 #include <SPI.h>
 #include <MFRC522.h>
 #include <Adafruit_NeoPixel.h>
+#include <Ticker.h>
 
-//led initializing ---
-#define LED_PIN     2  // GPIO pin connected to the LED
-#define relay_PIN     22  // GPIO pin connected to the LED
+// --- Pins ---
+#define LED_PIN       2
+#define relay_PIN     22
+#define NUMPIXELS     1
+#define SPI_RST_PIN   17
+#define SPI_SS_PIN    5
+#define SPI_MOSI_PIN  13
+#define SPI_MISO_PIN  12
+#define SPI_SCK_PIN   14
+#define BUZZER_PIN    25
 
-#define NUMPIXELS   1   // Number of NeoPixels
 Adafruit_NeoPixel pixels(NUMPIXELS, LED_PIN, NEO_GRB + NEO_KHZ800);
+MFRC522 mfrc522(SPI_SS_PIN, SPI_RST_PIN);
 
-// Your custom pin configuration
-#define SPI_INT_PIN  15  // Not typically used for basic reading
-#define SPI_RST_PIN  17
-#define SPI_SS_PIN   5
-#define SPI_MOSI_PIN 13
-#define SPI_MISO_PIN 12
-#define SPI_SCK_PIN  14
-#define BUZZER_PIN   25  // Buzzer pin
+// Authorized UID
+const byte authorizedUID[] = {0xB8, 0x24, 0xA4, 0x51};
 
-MFRC522 mfrc522(SPI_SS_PIN, SPI_RST_PIN);  // Create MFRC522 instance
+// Ticker objects
+Ticker buzzerTicker;
+Ticker relayTicker;
 
-// Define authorized UID (replace with your actual card's UID)
-const byte authorizedUID[] = {0x94, 0x51, 0x94, 0xBF};
+// Variables for beeping pattern
+int beepCount = 0;
+int totalBeeps = 0;
+int beepFrequency = 0;
+bool buzzerState = false;
 
-// ===== FUNCTION DECLARATIONS =====
-// (Put these at the top so they're known to all functions)
-
-// Helper function to print byte array
+// ===== Function Declarations =====
 void dump_byte_array(byte *buffer, byte bufferSize);
-
-// Action to perform when authorized card is detected
-void authorizedAction();
-
-// Action to perform when unauthorized card is detected
-void unauthorizedAction();
-
-// Compare two UIDs
 bool compareUID(byte *uid1, const byte *uid2, byte size);
 
-// ===== FUNCTION DEFINITIONS =====
+void startBuzzerPattern(int beeps, int frequency, int intervalMs);
+void buzzerHandler();
 
+void authorizedAction();
+void unauthorizedAction();
+
+// ===== SETUP =====
 void setup() {
     pinMode(BUZZER_PIN, OUTPUT);
     pinMode(relay_PIN, OUTPUT);
 
     Serial.begin(9600);
-
-    pixels.begin();            // Initialize NeoPixel
-    // Turn off led ---
-    pixels.setPixelColor(0, pixels.Color(0, 0, 0));  // Red (R,G,B)
+    pixels.begin();
+    pixels.setPixelColor(0, pixels.Color(0, 0, 0));
     pixels.show();
 
-    // Initialize SPI with your custom pins
     SPI.begin(SPI_SCK_PIN, SPI_MISO_PIN, SPI_MOSI_PIN, SPI_SS_PIN);
     mfrc522.PCD_Init();
     delay(4);
     mfrc522.PCD_DumpVersionToSerial();
     Serial.println(F("Scan RFID/NFC Tag..."));
 
-    // Startup sound
-    for (int freq = 500; freq <= 1500; freq += 100) {
-        tone(BUZZER_PIN, freq);
-        delay(100);
-    }
-    noTone(BUZZER_PIN);
+    // Startup sound (non-blocking version)
+    startBuzzerPattern(5, 800, 150);  // Just for bootup
 }
 
+// ===== LOOP =====
 void loop() {
-    // Reset the loop if no new card present
-    if (!mfrc522.PICC_IsNewCardPresent()) {
-        return;
-    }
+    if (!mfrc522.PICC_IsNewCardPresent()) return;
+    if (!mfrc522.PICC_ReadCardSerial()) return;
 
-    // Select one of the cards
-    if (!mfrc522.PICC_ReadCardSerial()) {
-        return;
-    }
-
-    // Print UID
     Serial.print(F("Card UID:"));
     dump_byte_array(mfrc522.uid.uidByte, mfrc522.uid.size);
     Serial.println();
 
-    // Check if the detected UID matches our authorized UID
     if (compareUID(mfrc522.uid.uidByte, authorizedUID, mfrc522.uid.size)) {
-        // Turn led to blue ---
-        pixels.setPixelColor(0, pixels.Color(255, 0, 255));  // Red (R,G,B)
+        pixels.setPixelColor(0, pixels.Color(255, 0, 255)); // Pink
         pixels.show();
 
         Serial.println(F("Authorized card detected!"));
         authorizedAction();
-    }
-    else {
-        // Turn led to blue ---
-        pixels.setPixelColor(0, pixels.Color(255, 0, 0));  // Red (R,G,B)
+    } else {
+        pixels.setPixelColor(0, pixels.Color(255, 0, 0)); // Red
         pixels.show();
 
         Serial.println(F("Unknown card"));
@@ -105,43 +88,59 @@ void loop() {
     mfrc522.PCD_StopCrypto1();
 }
 
-// Helper function to print byte array
+// ===== FUNCTIONS =====
+
+// Start buzzer pattern
+void startBuzzerPattern(int beeps, int frequency, int intervalMs) {
+    totalBeeps = beeps * 2; // On + off counts as 2
+    beepCount = 0;
+    beepFrequency = frequency;
+    buzzerState = false;
+    buzzerTicker.attach_ms(intervalMs, buzzerHandler);
+}
+
+// Buzzer tick
+void buzzerHandler() {
+    if (beepCount >= totalBeeps) {
+        buzzerTicker.detach();
+        noTone(BUZZER_PIN);
+        return;
+    }
+
+    if (buzzerState) {
+        noTone(BUZZER_PIN);
+    } else {
+        tone(BUZZER_PIN, beepFrequency);
+    }
+
+    buzzerState = !buzzerState;
+    beepCount++;
+}
+
+// Authorized action
+void authorizedAction() {
+    startBuzzerPattern(1, 1500, 100); // One short high beep
+    digitalWrite(relay_PIN, LOW);
+    relayTicker.once(2, []() { digitalWrite(relay_PIN, HIGH); }); // Turn off after 2 sec
+}
+
+// Unauthorized action
+void unauthorizedAction() {
+    startBuzzerPattern(3, 1000, 100); // Triple low beep
+}
+
+// Compare UIDs
+bool compareUID(byte *uid1, const byte *uid2, byte size) {
+    for (byte i = 0; i < size; i++) {
+        if (uid1[i] != uid2[i]) return false;
+    }
+    return true;
+}
+
+// Print UID
 void dump_byte_array(byte *buffer, byte bufferSize) {
     for (byte i = 0; i < bufferSize; i++) {
         Serial.print(buffer[i] < 0x10 ? " 0" : " ");
         Serial.print(buffer[i], HEX);
     }
-}
-
-// Action to perform when authorized card is detected
-void authorizedAction() {
-    for (int i = 0; i < 1; i++) {
-        tone(BUZZER_PIN, 1500); // Play 1500 Hz tone
-        delay(100);             // Beep duration
-        noTone(BUZZER_PIN);     // Stop tone
-        delay(100);             // Pause
-    }
-
-    digitalWrite(relay_PIN, low);
-}
-
-// Action to perform when unauthorized card is detected
-void unauthorizedAction() {
-    // Triple beep pattern for unauthorized cards
-    for (int i = 0; i < 3; i++) {
-        tone(BUZZER_PIN, 1000); // Lower pitch for unauthorized
-        delay(100);
-        noTone(BUZZER_PIN);
-        delay(100);
-    }
-}
-
-// Compare two UIDs
-bool compareUID(byte *uid1, const byte *uid2, byte size) {
-    for (byte i = 0; i < size; i++) {
-        if (uid1[i] != uid2[i]) {
-            return false;
-        }
-    }
-    return true;
 }
